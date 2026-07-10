@@ -96,7 +96,7 @@ func matchesSpec(descriptor configv1.InfrastructureStatus, actual configv1.Infra
 	}
 
 	// Platform Type Check
-	if descriptor.PlatformStatus != nil && descriptor.PlatformStatus.Type != "" && actual.PlatformSpec.Type != "" {
+	if descriptor.PlatformStatus != nil && descriptor.PlatformStatus.Type != "" {
 		if descriptor.PlatformStatus.Type != actual.PlatformSpec.Type {
 			return false
 		}

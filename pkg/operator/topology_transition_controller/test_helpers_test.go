@@ -43,6 +43,7 @@ func newTestInfra(specTopology, statusTopology, statusInfraTopology configv1.Top
 	}
 	if platformType != "" {
 		infra.Status.PlatformStatus = &configv1.PlatformStatus{Type: platformType}
+		infra.Spec.PlatformSpec = configv1.PlatformSpec{Type: platformType}
 	}
 	return infra
 }

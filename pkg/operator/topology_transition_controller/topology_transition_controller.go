@@ -309,6 +309,9 @@ func (c *TopologyTransitionController) checkClusterReconciliation(ctx context.Co
 // client failures — validator failures are reflected in condition status.
 func (c *TopologyTransitionController) updateValidTransitions(ctx context.Context) error {
 	infra, err := c.infraLister.Get("cluster")
+	if errors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -328,8 +331,16 @@ func (c *TopologyTransitionController) updateValidTransitions(ctx context.Contex
 		condType := transitionAvailableConditionPrefix + td.Name + transitionAvailableConditionSuffix
 		activeConditionTypes[condType] = true
 
-		// Run this transition's validators to determine readiness.
+		// Run global preflight checks and this transition's validators to
+		// determine readiness. Both must pass — reconcileTransition's
+		// validatePreflight enforces the same combination before actually
+		// starting the transition.
 		var validatorErrors []string
+		for _, v := range c.preflightChecks {
+			if vErr := v(); vErr != nil {
+				validatorErrors = append(validatorErrors, vErr.Error())
+			}
+		}
 		for _, v := range td.Validators {
 			if vErr := v(); vErr != nil {
 				validatorErrors = append(validatorErrors, vErr.Error())
@@ -371,9 +382,9 @@ func (c *TopologyTransitionController) updateValidTransitions(ctx context.Contex
 
 	for _, cond := range status.Conditions {
 		if strings.HasPrefix(cond.Type, transitionAvailableConditionPrefix) &&
+			strings.HasSuffix(cond.Type, transitionAvailableConditionSuffix) &&
 			!activeConditionTypes[cond.Type] {
-			// Remove by setting to a "not applicable" state that
-			// v1helpers.UpdateConditionFn will pick up as a change.
+			// Delete the condition outright rather than updating its status.
 			conditionFns = append(conditionFns, removeConditionFn(cond.Type))
 		}
 	}

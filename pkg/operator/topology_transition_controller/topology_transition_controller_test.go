@@ -453,6 +453,42 @@ func TestMatchesSpec(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "platform type match",
+			descriptor: configv1.InfrastructureStatus{
+				PlatformStatus: &configv1.PlatformStatus{Type: configv1.NonePlatformType},
+			},
+			actual: configv1.InfrastructureSpec{
+				PlatformSpec: configv1.PlatformSpec{Type: configv1.NonePlatformType},
+			},
+			expected: true,
+		},
+		{
+			name: "platform type mismatch",
+			descriptor: configv1.InfrastructureStatus{
+				PlatformStatus: &configv1.PlatformStatus{Type: configv1.NonePlatformType},
+			},
+			actual: configv1.InfrastructureSpec{
+				PlatformSpec: configv1.PlatformSpec{Type: configv1.AWSPlatformType},
+			},
+			expected: false,
+		},
+		{
+			name: "platform type required but actual unset does not match",
+			descriptor: configv1.InfrastructureStatus{
+				PlatformStatus: &configv1.PlatformStatus{Type: configv1.NonePlatformType},
+			},
+			actual:   configv1.InfrastructureSpec{},
+			expected: false,
+		},
+		{
+			name:       "nil descriptor platform status is a wildcard",
+			descriptor: configv1.InfrastructureStatus{},
+			actual: configv1.InfrastructureSpec{
+				PlatformSpec: configv1.PlatformSpec{Type: configv1.AWSPlatformType},
+			},
+			expected: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -773,13 +809,12 @@ func TestUpdateValidTransitions(t *testing.T) {
 		assert.Nil(t, v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_NonMatchingTransition_Available"))
 	})
 
-	t.Run("infra lister error is propagated", func(t *testing.T) {
+	t.Run("infra not found is treated as benign, matching sync()", func(t *testing.T) {
 		ctrl := newTestController(newTestInfra("", configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType), nil, nil, nil, nil)
 		// Point the lister at an empty indexer so "cluster" is not found.
 		ctrl.infraLister = configlistersv1.NewInfrastructureLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
 
-		err := ctrl.updateValidTransitions(context.TODO())
-		assert.Error(t, err)
+		assert.NoError(t, ctrl.updateValidTransitions(context.TODO()))
 	})
 
 	t.Run("sync publishes valid transition conditions alongside existing behavior", func(t *testing.T) {
