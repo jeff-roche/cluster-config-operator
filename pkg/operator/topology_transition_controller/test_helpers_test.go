@@ -230,7 +230,7 @@ func noopTransitions() []TransitionDescriptor {
 				InfrastructureTopology: configv1.SingleReplicaTopologyMode,
 				PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
 			},
-			To: configv1.InfrastructureSpec{
+			To: configv1.InfrastructureStatus{
 				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 			},
 			Validators: nil,

@@ -3,6 +3,7 @@ package topology_transition_controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -21,17 +22,10 @@ import (
 	"k8s.io/utils/clock"
 )
 
-const (
-	transitionProgressingCondition = "TopologyTransitionControllerProgressing"
-	upgradeableCondition           = "TopologyTransitionControllerUpgradeable"
-
-	reasonTopologyTransitionInProgress = "TopologyTransitionInProgress"
-
-	// minReconciliationSoakTime is the minimum time to wait after a transition
-	// starts before accepting reconciliation checks as passing. This prevents
-	// premature completion when downstream operators haven't started progressing yet.
-	minReconciliationSoakTime = 5 * time.Minute
-)
+// minReconciliationSoakTime is the minimum time to wait after a transition
+// starts before accepting reconciliation checks as passing. This prevents
+// premature completion when downstream operators haven't started progressing yet.
+const minReconciliationSoakTime = 5 * time.Minute
 
 // TopologyTransitionController manages day-2 control plane topology transitions.
 // It watches for changes to the desired topology in the Infrastructure spec,
@@ -103,6 +97,13 @@ func (c *TopologyTransitionController) sync(ctx context.Context, syncCtx factory
 		return nil
 	}
 	if err != nil {
+		return err
+	}
+
+	// Always evaluate and publish valid transitions regardless of
+	// whether a transition is in progress, idle, or pending so the
+	// cli can evaluate valid transitions
+	if err := c.updateValidTransitions(ctx); err != nil {
 		return err
 	}
 
@@ -300,4 +301,88 @@ func (c *TopologyTransitionController) checkClusterReconciliation(ctx context.Co
 		}),
 	)
 	return updateErr
+}
+
+// updateValidTransitions evaluates which topology transitions are valid from
+// the current infrastructure state and publishes their readiness as operator
+// conditions. Returns an error only on infrastructure lister or operator
+// client failures — validator failures are reflected in condition status.
+func (c *TopologyTransitionController) updateValidTransitions(ctx context.Context) error {
+	infra, err := c.infraLister.Get("cluster")
+	if err != nil {
+		return err
+	}
+
+	// Build the desired set of transition conditions.
+	var conditionFns []v1helpers.UpdateStatusFunc
+	activeConditionTypes := map[string]bool{}
+
+	for i := range c.transitions {
+		td := &c.transitions[i]
+
+		// Only advertise transitions valid from the current state.
+		if !matchesStatus(td.From, infra.Status) {
+			continue
+		}
+
+		condType := transitionAvailableConditionPrefix + td.Name + transitionAvailableConditionSuffix
+		activeConditionTypes[condType] = true
+
+		// Run this transition's validators to determine readiness.
+		var validatorErrors []string
+		for _, v := range td.Validators {
+			if vErr := v(); vErr != nil {
+				validatorErrors = append(validatorErrors, vErr.Error())
+			}
+		}
+
+		if len(validatorErrors) == 0 {
+			conditionFns = append(conditionFns, v1helpers.UpdateConditionFn(
+				operatorv1.OperatorCondition{
+					Type:   condType,
+					Status: operatorv1.ConditionTrue,
+					Reason: "AllPreflightChecksPassed",
+					Message: fmt.Sprintf(
+						"Transition from %s to %s is available",
+						infra.Status.ControlPlaneTopology,
+						td.To.ControlPlaneTopology,
+					),
+				},
+			))
+		} else {
+			conditionFns = append(conditionFns, v1helpers.UpdateConditionFn(
+				operatorv1.OperatorCondition{
+					Type:    condType,
+					Status:  operatorv1.ConditionFalse,
+					Reason:  "PreflightCheckFailed",
+					Message: strings.Join(validatorErrors, "; "),
+				},
+			))
+		}
+	}
+
+	// Remove stale conditions for transitions that no longer apply
+	// (e.g. after completing a transition, the old "from" state no
+	// longer matches).
+	_, status, _, err := c.operatorClient.GetOperatorState()
+	if err != nil {
+		return err
+	}
+
+	for _, cond := range status.Conditions {
+		if strings.HasPrefix(cond.Type, transitionAvailableConditionPrefix) &&
+			!activeConditionTypes[cond.Type] {
+			// Remove by setting to a "not applicable" state that
+			// v1helpers.UpdateConditionFn will pick up as a change.
+			conditionFns = append(conditionFns, removeConditionFn(cond.Type))
+		}
+	}
+
+	// Don't run an update if there are no changes
+	if len(conditionFns) != 0 {
+		_, _, updateErr := v1helpers.UpdateStatus(ctx, c.operatorClient, conditionFns...)
+		return updateErr
+	}
+
+	return nil
 }

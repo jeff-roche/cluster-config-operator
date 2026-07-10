@@ -10,8 +10,10 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
+	configlistersv1 "github.com/openshift/client-go/config/listers/config/v1"
 	"github.com/openshift/library-go/pkg/operator/v1helpers"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 	clocktesting "k8s.io/utils/clock/testing"
 )
 
@@ -82,7 +84,7 @@ func TestSync(t *testing.T) {
 					InfrastructureTopology: configv1.SingleReplicaTopologyMode,
 					PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
 				},
-				To: configv1.InfrastructureSpec{
+				To: configv1.InfrastructureStatus{
 					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 				},
 				Validators: []TransitionValidatorFunc{
@@ -419,13 +421,13 @@ func TestMatchesStatus(t *testing.T) {
 func TestMatchesSpec(t *testing.T) {
 	tests := []struct {
 		name       string
-		descriptor configv1.InfrastructureSpec
+		descriptor configv1.InfrastructureStatus
 		actual     configv1.InfrastructureSpec
 		expected   bool
 	}{
 		{
 			name: "exact match",
-			descriptor: configv1.InfrastructureSpec{
+			descriptor: configv1.InfrastructureStatus{
 				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 			},
 			actual: configv1.InfrastructureSpec{
@@ -435,7 +437,7 @@ func TestMatchesSpec(t *testing.T) {
 		},
 		{
 			name:       "wildcard matches any",
-			descriptor: configv1.InfrastructureSpec{},
+			descriptor: configv1.InfrastructureStatus{},
 			actual: configv1.InfrastructureSpec{
 				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 			},
@@ -443,7 +445,7 @@ func TestMatchesSpec(t *testing.T) {
 		},
 		{
 			name: "mismatch",
-			descriptor: configv1.InfrastructureSpec{
+			descriptor: configv1.InfrastructureStatus{
 				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 			},
 			actual: configv1.InfrastructureSpec{
@@ -566,5 +568,249 @@ func TestValidatePreflight(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "operators unstable")
 		assert.Contains(t, err.Error(), "etcd not ready")
+	})
+}
+
+func TestUpdateValidTransitions(t *testing.T) {
+	t.Run("publishes True condition when validators pass", func(t *testing.T) {
+		infra := newTestInfra("", configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "TransitionA",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: []TransitionValidatorFunc{
+					func() error { return nil },
+				},
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		cond := v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_TransitionA_Available")
+		if !assert.NotNil(t, cond) {
+			return
+		}
+		assert.Equal(t, operatorv1.ConditionTrue, cond.Status)
+		assert.Equal(t, "AllPreflightChecksPassed", cond.Reason)
+		assert.Contains(t, cond.Message, "SingleReplica")
+		assert.Contains(t, cond.Message, "HighlyAvailable")
+	})
+
+	t.Run("publishes False condition with accumulated validator errors", func(t *testing.T) {
+		infra := newTestInfra("", configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "TransitionA",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: []TransitionValidatorFunc{
+					func() error { return fmt.Errorf("insufficient control plane nodes") },
+					func() error { return fmt.Errorf("etcd not ready") },
+				},
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		cond := v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_TransitionA_Available")
+		if !assert.NotNil(t, cond) {
+			return
+		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
+		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
+		assert.Contains(t, cond.Message, "insufficient control plane nodes")
+		assert.Contains(t, cond.Message, "etcd not ready")
+	})
+
+	t.Run("skips transitions that don't match current status", func(t *testing.T) {
+		infra := newTestInfra("", configv1.HighlyAvailableTopologyMode, configv1.HighlyAvailableTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "TransitionA",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: nil,
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Nil(t, v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_TransitionA_Available"))
+	})
+
+	t.Run("removes stale condition when transition no longer matches", func(t *testing.T) {
+		infra := newTestInfra("", configv1.HighlyAvailableTopologyMode, configv1.HighlyAvailableTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "TransitionA",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: nil,
+			},
+		}
+		staleConditions := []operatorv1.OperatorCondition{
+			{
+				Type:   "TopologyTransition_TransitionA_Available",
+				Status: operatorv1.ConditionTrue,
+				Reason: "AllPreflightChecksPassed",
+			},
+		}
+		ctrl := newTestController(infra, staleConditions, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Nil(t, v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_TransitionA_Available"))
+	})
+
+	t.Run("does not touch operator status when no transitions match and no stale conditions exist", func(t *testing.T) {
+		infra := newTestInfra("", configv1.HighlyAvailableTopologyMode, configv1.HighlyAvailableTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "TransitionA",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: nil,
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Empty(t, status.Conditions)
+	})
+
+	t.Run("evaluates multiple transitions independently", func(t *testing.T) {
+		infra := newTestInfra("", configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "MatchingTransition",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: []TransitionValidatorFunc{
+					func() error { return nil },
+				},
+			},
+			{
+				Name: "NonMatchingTransition",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.SingleReplicaTopologyMode,
+				},
+				Validators: nil,
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.updateValidTransitions(context.TODO())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.True(t, v1helpers.IsOperatorConditionTrue(status.Conditions, "TopologyTransition_MatchingTransition_Available"))
+		assert.Nil(t, v1helpers.FindOperatorCondition(status.Conditions, "TopologyTransition_NonMatchingTransition_Available"))
+	})
+
+	t.Run("infra lister error is propagated", func(t *testing.T) {
+		ctrl := newTestController(newTestInfra("", configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType), nil, nil, nil, nil)
+		// Point the lister at an empty indexer so "cluster" is not found.
+		ctrl.infraLister = configlistersv1.NewInfrastructureLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
+
+		err := ctrl.updateValidTransitions(context.TODO())
+		assert.Error(t, err)
+	})
+
+	t.Run("sync publishes valid transition conditions alongside existing behavior", func(t *testing.T) {
+		infra := newTestInfra(configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.SingleReplicaTopologyMode, configv1.NonePlatformType)
+		transitions := []TransitionDescriptor{
+			{
+				Name: "SNOtoHACompact",
+				From: configv1.InfrastructureStatus{
+					ControlPlaneTopology:   configv1.SingleReplicaTopologyMode,
+					InfrastructureTopology: configv1.SingleReplicaTopologyMode,
+					PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
+				},
+				To: configv1.InfrastructureStatus{
+					ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+				},
+				Validators: []TransitionValidatorFunc{
+					func() error { return nil },
+				},
+				UpdateStatus: func(infra *configv1.Infrastructure) {},
+			},
+		}
+		ctrl := newTestController(infra, nil, nil, transitions, nil)
+
+		if !assert.NoError(t, ctrl.sync(context.TODO(), newTestSyncContext())) {
+			return
+		}
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.True(t, v1helpers.IsOperatorConditionTrue(status.Conditions, "TopologyTransition_SNOtoHACompact_Available"))
 	})
 }
