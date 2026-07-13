@@ -43,6 +43,7 @@ func newTestInfra(specTopology, statusTopology, statusInfraTopology configv1.Top
 	}
 	if platformType != "" {
 		infra.Status.PlatformStatus = &configv1.PlatformStatus{Type: platformType}
+		infra.Spec.PlatformSpec = configv1.PlatformSpec{Type: platformType}
 	}
 	return infra
 }
@@ -230,7 +231,7 @@ func noopTransitions() []TransitionDescriptor {
 				InfrastructureTopology: configv1.SingleReplicaTopologyMode,
 				PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
 			},
-			To: configv1.InfrastructureSpec{
+			To: configv1.InfrastructureStatus{
 				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
 			},
 			Validators: nil,

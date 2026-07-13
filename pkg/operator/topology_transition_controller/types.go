@@ -4,8 +4,20 @@ import (
 	"fmt"
 
 	configv1 "github.com/openshift/api/config/v1"
+	operatorv1 "github.com/openshift/api/operator/v1"
 	operatorv1listers "github.com/openshift/client-go/operator/listers/operator/v1"
+	"github.com/openshift/library-go/pkg/operator/v1helpers"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+)
+
+const (
+	// transitionAvailableConditionPrefix is used to build per-transition
+	// condition types: TopologyTransition_<Name>_Available
+	transitionAvailableConditionPrefix = "TopologyTransition_"
+	transitionAvailableConditionSuffix = "_Available"
+	transitionProgressingCondition     = "TopologyTransitionControllerProgressing"
+	upgradeableCondition               = "TopologyTransitionControllerUpgradeable"
+	reasonTopologyTransitionInProgress = "TopologyTransitionInProgress"
 )
 
 // TransitionValidatorFunc defines validation functions for transitions
@@ -17,8 +29,9 @@ type TransitionValidatorFunc func() error
 // desired Infrastructure spec. Zero-value fields act as wildcards in both
 // matchers.
 type TransitionDescriptor struct {
+	Name         string
 	From         configv1.InfrastructureStatus
-	To           configv1.InfrastructureSpec
+	To           configv1.InfrastructureStatus
 	Validators   []TransitionValidatorFunc
 	UpdateStatus func(infra *configv1.Infrastructure)
 }
@@ -29,13 +42,16 @@ func buildSupportedTransitions(nodeLister corev1listers.NodeLister, etcdConfigMa
 	return []TransitionDescriptor{
 		// SNO to HA Compact on platformType: None
 		{
+			Name: "SNOtoHACompact",
 			From: configv1.InfrastructureStatus{
 				ControlPlaneTopology:   configv1.SingleReplicaTopologyMode,
 				InfrastructureTopology: configv1.SingleReplicaTopologyMode,
 				PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
 			},
-			To: configv1.InfrastructureSpec{
-				ControlPlaneTopology: configv1.HighlyAvailableTopologyMode,
+			To: configv1.InfrastructureStatus{
+				ControlPlaneTopology:   configv1.HighlyAvailableTopologyMode,
+				InfrastructureTopology: configv1.HighlyAvailableTopologyMode,
+				PlatformStatus:         &configv1.PlatformStatus{Type: configv1.NonePlatformType},
 			},
 			Validators: []TransitionValidatorFunc{
 				validateControlPlaneNodeCount(3, nodeLister),
@@ -73,10 +89,19 @@ func matchesStatus(descriptor, actual configv1.InfrastructureStatus) bool {
 
 // matchesSpec returns true if every non-zero field in descriptor equals
 // the corresponding field in actual. Zero-value fields are skipped.
-func matchesSpec(descriptor, actual configv1.InfrastructureSpec) bool {
+func matchesSpec(descriptor configv1.InfrastructureStatus, actual configv1.InfrastructureSpec) bool {
+	// Control Plane Topology Check
 	if descriptor.ControlPlaneTopology != "" && descriptor.ControlPlaneTopology != actual.ControlPlaneTopology {
 		return false
 	}
+
+	// Platform Type Check
+	if descriptor.PlatformStatus != nil && descriptor.PlatformStatus.Type != "" {
+		if descriptor.PlatformStatus.Type != actual.PlatformSpec.Type {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -96,4 +121,13 @@ func findTransition(infra *configv1.Infrastructure, transitions []TransitionDesc
 	return nil, fmt.Errorf("transition from {controlPlane=%s, infrastructure=%s, platform=%s} to {controlPlane=%s} is not supported",
 		infra.Status.ControlPlaneTopology, infra.Status.InfrastructureTopology,
 		platformType, infra.Spec.ControlPlaneTopology)
+}
+
+// removeConditionFn returns an UpdateStatusFunc that removes the
+// condition with the given type from the operator status.
+func removeConditionFn(condType string) v1helpers.UpdateStatusFunc {
+	return func(oldStatus *operatorv1.OperatorStatus) error {
+		v1helpers.RemoveOperatorCondition(&oldStatus.Conditions, condType)
+		return nil
+	}
 }
