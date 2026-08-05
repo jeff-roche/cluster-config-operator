@@ -278,6 +278,49 @@ func TestSync(t *testing.T) {
 			return
 		}
 		assert.True(t, v1helpers.IsOperatorConditionTrue(status.Conditions, upgradeableCondition))
+
+		// The stale rejection reason on transitionProgressingCondition must not
+		// linger once the offending spec change has been withdrawn.
+		progressingCond := v1helpers.FindOperatorCondition(status.Conditions, transitionProgressingCondition)
+		if !assert.NotNil(t, progressingCond) {
+			return
+		}
+		assert.Equal(t, operatorv1.ConditionFalse, progressingCond.Status)
+		assert.NotEqual(t, "PreflightCheckFailed", progressingCond.Reason)
+		assert.Equal(t, "AsExpected", progressingCond.Reason)
+	})
+
+	t.Run("reverting spec to match status clears stale UnsupportedTransition reason", func(t *testing.T) {
+		infra := newTestInfra(configv1.HighlyAvailableTopologyMode, configv1.HighlyAvailableTopologyMode, configv1.HighlyAvailableTopologyMode, configv1.NonePlatformType)
+		staleConditions := []operatorv1.OperatorCondition{
+			{
+				Type:   upgradeableCondition,
+				Status: operatorv1.ConditionFalse,
+				Reason: "UnsupportedTransition",
+			},
+			{
+				Type:   transitionProgressingCondition,
+				Status: operatorv1.ConditionFalse,
+				Reason: "UnsupportedTransition",
+			},
+		}
+		ctrl := newTestController(infra, staleConditions, nil, noopTransitions())
+
+		assert.NoError(t, ctrl.sync(context.TODO(), newTestSyncContext()))
+
+		_, status, _, err := ctrl.operatorClient.GetOperatorState()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.True(t, v1helpers.IsOperatorConditionTrue(status.Conditions, upgradeableCondition))
+
+		progressingCond := v1helpers.FindOperatorCondition(status.Conditions, transitionProgressingCondition)
+		if !assert.NotNil(t, progressingCond) {
+			return
+		}
+		assert.Equal(t, operatorv1.ConditionFalse, progressingCond.Status)
+		assert.NotEqual(t, "UnsupportedTransition", progressingCond.Reason)
+		assert.Equal(t, "AsExpected", progressingCond.Reason)
 	})
 
 	t.Run("spec change during status update skips update and returns nil", func(t *testing.T) {

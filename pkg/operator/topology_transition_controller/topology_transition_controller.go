@@ -159,10 +159,21 @@ func (c *TopologyTransitionController) sync(ctx context.Context, syncCtx factory
 			return c.checkClusterReconciliation(ctx, infra)
 		}
 
+		// Otherwise Upgradeable was blocked by a rejected transition request
+		// (unsupported transition or failed preflight check). Since spec no
+		// longer differs from status, the request was withdrawn; clear both
+		// conditions back to idle so a stale rejection reason doesn't linger
+		// on transitionProgressingCondition.
 		_, _, updateErr := v1helpers.UpdateStatus(ctx, c.operatorClient,
 			v1helpers.UpdateConditionFn(operatorv1.OperatorCondition{
 				Type:    upgradeableCondition,
 				Status:  operatorv1.ConditionTrue,
+				Reason:  "AsExpected",
+				Message: "No topology transition in progress",
+			}),
+			v1helpers.UpdateConditionFn(operatorv1.OperatorCondition{
+				Type:    transitionProgressingCondition,
+				Status:  operatorv1.ConditionFalse,
 				Reason:  "AsExpected",
 				Message: "No topology transition in progress",
 			}),
