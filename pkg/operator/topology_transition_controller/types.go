@@ -6,6 +6,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	machineconfigv1listers "github.com/openshift/client-go/machineconfiguration/listers/machineconfiguration/v1"
 	operatorv1listers "github.com/openshift/client-go/operator/listers/operator/v1"
+	"github.com/openshift/library-go/pkg/operator/v1helpers"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 )
 
@@ -34,6 +35,7 @@ type TransitionValidationListers struct {
 	IngressControllerLister  operatorv1listers.IngressControllerNamespaceLister
 	MachineConfigLister      machineconfigv1listers.MachineConfigLister
 	MachineConfigPoolLister  machineconfigv1listers.MachineConfigPoolLister
+	OperatorClient           v1helpers.OperatorClient
 }
 
 // buildSupportedTransitions returns the set of permitted topology transitions
@@ -71,8 +73,8 @@ func buildSupportedTransitions(listers TransitionValidationListers) []Transition
 				validateEtcdNotProgressing(listers.EtcdLister),
 				validateEtcdVotingMembers(3, listers.EtcdConfigMapLister),
 				validateMachineConfigNotPresent("50-master-dnsmasq-configuration", listers.MachineConfigLister),
-				validateNewRenderedMasterConfig(listers.MachineConfigLister),
-				validateNewRenderedWorkerConfig(listers.MachineConfigLister),
+				validateNewRenderedMasterConfig(listers.MachineConfigLister, listers.OperatorClient),
+				validateNewRenderedWorkerConfig(listers.MachineConfigLister, listers.OperatorClient),
 				validateMachineConfigPoolReadyCount(3, listers.MachineConfigPoolLister),
 				validateIngressRouterCount(2, listers.IngressControllerLister),
 				validateKubeAPIServerNodeCount(3, listers.KubeAPIServerLister),

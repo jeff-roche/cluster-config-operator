@@ -61,6 +61,8 @@ func NewController(
 	etcdOperatorInformer cache.SharedIndexInformer,
 	clusterOperatorLister configlistersv1.ClusterOperatorLister,
 	clusterOperatorInformer cache.SharedIndexInformer,
+	clusterVersionLister configlistersv1.ClusterVersionLister,
+	clusterVersionInformer cache.SharedIndexInformer,
 	kubeAPIServerLister operatorv1listers.KubeAPIServerLister,
 	kubeAPIServerInformer cache.SharedIndexInformer,
 	openShiftAPIServerLister operatorv1listers.OpenShiftAPIServerLister,
@@ -83,6 +85,7 @@ func NewController(
 		IngressControllerLister:  ingressControllerLister,
 		MachineConfigLister:      machineConfigLister,
 		MachineConfigPoolLister:  machineConfigPoolLister,
+		OperatorClient:           operatorClient,
 	}
 	c := &TopologyTransitionController{
 		operatorClient: operatorClient,
@@ -90,6 +93,7 @@ func NewController(
 		infraClient:    infraClient.Infrastructures(),
 		preflightChecks: []TransitionValidatorFunc{
 			validateClusterOperatorsStable(clusterOperatorLister),
+			validateNoClusterVersionUpgradeInProgress(clusterVersionLister),
 		},
 		transitions: buildSupportedTransitions(listers),
 		clock:       clk,
@@ -102,6 +106,7 @@ func NewController(
 			etcdConfigMapInformer,
 			etcdOperatorInformer,
 			clusterOperatorInformer,
+			clusterVersionInformer,
 			kubeAPIServerInformer,
 			openShiftAPIServerInformer,
 			ingressControllerInformer,
@@ -124,6 +129,7 @@ func (c *TopologyTransitionController) sync(ctx context.Context, syncCtx factory
 		syncCtx.Recorder().Warningf("TopologyTransitionController", "Required infrastructures.%s/cluster not found", configv1.GroupName)
 		return nil
 	}
+
 	if err != nil {
 		return err
 	}
@@ -141,6 +147,7 @@ func (c *TopologyTransitionController) sync(ctx context.Context, syncCtx factory
 	if err != nil {
 		return err
 	}
+
 	transitionProgressing := v1helpers.IsOperatorConditionTrue(status.Conditions, transitionProgressingCondition)
 	controllerUpgradeable := v1helpers.IsOperatorConditionTrue(status.Conditions, upgradeableCondition)
 

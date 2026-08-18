@@ -339,6 +339,7 @@ type testFixture struct {
 	cmIndexer   cache.Indexer
 	etcdIndexer cache.Indexer
 	coIndexer   cache.Indexer
+	cvIndexer   cache.Indexer
 	mcIndexer   cache.Indexer
 	mcpIndexer  cache.Indexer
 	icIndexer   cache.Indexer
@@ -349,11 +350,14 @@ type testFixture struct {
 	cmLister   corev1listers.ConfigMapNamespaceLister
 	etcdLister operatorv1listers.EtcdLister
 	coLister   configlistersv1.ClusterOperatorLister
+	cvLister   configlistersv1.ClusterVersionLister
 	mcLister   machineconfigv1listers.MachineConfigLister
 	mcpLister  machineconfigv1listers.MachineConfigPoolLister
 	icLister   operatorv1listers.IngressControllerNamespaceLister
 	kasLister  operatorv1listers.KubeAPIServerLister
 	oasLister  operatorv1listers.OpenShiftAPIServerLister
+
+	operatorClient v1helpers.OperatorClient
 }
 
 // ingressOperatorNamespace is the namespace IngressControllers live in.
@@ -364,17 +368,25 @@ func newTestFixture() *testFixture {
 	cmIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	etcdIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	coIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	cvIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	mcIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	mcpIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	icIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	kasIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	oasIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 
+	// Default to no upgrade in progress, so fixtures that don't care about this
+	// check don't have to opt in to a passing ClusterVersion.
+	if err := cvIndexer.Add(newTestClusterVersion(false)); err != nil {
+		panic(fmt.Sprintf("failed to add cluster version to indexer: %v", err))
+	}
+
 	return &testFixture{
 		nodeIndexer: nodeIndexer,
 		cmIndexer:   cmIndexer,
 		etcdIndexer: etcdIndexer,
 		coIndexer:   coIndexer,
+		cvIndexer:   cvIndexer,
 		mcIndexer:   mcIndexer,
 		mcpIndexer:  mcpIndexer,
 		icIndexer:   icIndexer,
@@ -385,12 +397,39 @@ func newTestFixture() *testFixture {
 		cmLister:   corev1listers.NewConfigMapLister(cmIndexer).ConfigMaps(etcdNamespace),
 		etcdLister: operatorv1listers.NewEtcdLister(etcdIndexer),
 		coLister:   configlistersv1.NewClusterOperatorLister(coIndexer),
+		cvLister:   configlistersv1.NewClusterVersionLister(cvIndexer),
 		mcLister:   machineconfigv1listers.NewMachineConfigLister(mcIndexer),
 		mcpLister:  machineconfigv1listers.NewMachineConfigPoolLister(mcpIndexer),
 		icLister:   operatorv1listers.NewIngressControllerLister(icIndexer).IngressControllers(ingressOperatorNamespace),
 		kasLister:  operatorv1listers.NewKubeAPIServerLister(kasIndexer),
 		oasLister:  operatorv1listers.NewOpenShiftAPIServerLister(oasIndexer),
+
+		operatorClient: v1helpers.NewFakeOperatorClient(&operatorv1.OperatorSpec{}, &operatorv1.OperatorStatus{}, nil),
 	}
+}
+
+// withTransitionStartTime sets the transitionProgressingCondition's
+// LastTransitionTime, simulating a transition that began at t.
+func (f *testFixture) withTransitionStartTime(t time.Time) *testFixture {
+	f.operatorClient = v1helpers.NewFakeOperatorClient(&operatorv1.OperatorSpec{}, &operatorv1.OperatorStatus{
+		Conditions: []operatorv1.OperatorCondition{
+			{
+				Type:               transitionProgressingCondition,
+				Status:             operatorv1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(t),
+			},
+		},
+	}, nil)
+	return f
+}
+
+// withClusterVersion replaces the default (not-progressing) ClusterVersion
+// with one reflecting the given Progressing state.
+func (f *testFixture) withClusterVersion(progressing bool) *testFixture {
+	if err := f.cvIndexer.Update(newTestClusterVersion(progressing)); err != nil {
+		panic(fmt.Sprintf("failed to update cluster version in indexer: %v", err))
+	}
+	return f
 }
 
 func (f *testFixture) withNodes(nodes ...*corev1.Node) *testFixture {
@@ -472,12 +511,14 @@ func (f *testFixture) buildTransitions() []TransitionDescriptor {
 		IngressControllerLister:  f.icLister,
 		MachineConfigLister:      f.mcLister,
 		MachineConfigPoolLister:  f.mcpLister,
+		OperatorClient:           f.operatorClient,
 	})
 }
 
 func (f *testFixture) buildPreflightChecks() []TransitionValidatorFunc {
 	return []TransitionValidatorFunc{
 		validateClusterOperatorsStable(f.coLister),
+		validateNoClusterVersionUpgradeInProgress(f.cvLister),
 	}
 }
 
@@ -498,6 +539,21 @@ func newTestClusterOperator(name string, available, progressing, degraded config
 	}
 }
 
+func newTestClusterVersion(progressing bool) *configv1.ClusterVersion {
+	status := configv1.ConditionFalse
+	if progressing {
+		status = configv1.ConditionTrue
+	}
+	return &configv1.ClusterVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: clusterVersionName},
+		Status: configv1.ClusterVersionStatus{
+			Conditions: []configv1.ClusterOperatorStatusCondition{
+				{Type: configv1.OperatorProgressing, Status: status},
+			},
+		},
+	}
+}
+
 func newTestClusterOperatorLister(operators ...*configv1.ClusterOperator) configlistersv1.ClusterOperatorLister {
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	for _, co := range operators {
@@ -511,6 +567,12 @@ func newTestClusterOperatorLister(operators ...*configv1.ClusterOperator) config
 func newTestMachineConfig(name string) *machineconfigurationv1.MachineConfig {
 	return &machineconfigurationv1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
+	}
+}
+
+func newTestMachineConfigAt(name string, created time.Time) *machineconfigurationv1.MachineConfig {
+	return &machineconfigurationv1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: metav1.NewTime(created)},
 	}
 }
 

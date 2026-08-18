@@ -2,11 +2,15 @@ package topology_transition_controller
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	configv1 "github.com/openshift/api/config/v1"
+	operatorv1 "github.com/openshift/api/operator/v1"
+	configlistersv1 "github.com/openshift/client-go/config/listers/config/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestValidateClusterOperatorsStable(t *testing.T) {
@@ -178,6 +182,34 @@ func TestValidateClusterOperatorsStable(t *testing.T) {
 		assert.Contains(t, err.Error(), "etcd")
 		assert.Contains(t, err.Error(), "kube-apiserver")
 		assert.NotContains(t, err.Error(), "monitoring")
+	})
+}
+
+func TestValidateNoClusterVersionUpgradeInProgress(t *testing.T) {
+	t.Run("passes when no upgrade is in progress", func(t *testing.T) {
+		fixture := newTestFixture().withClusterVersion(false)
+		v := validateNoClusterVersionUpgradeInProgress(fixture.cvLister)
+		assert.NoError(t, v())
+	})
+
+	t.Run("fails when an upgrade is in progress", func(t *testing.T) {
+		fixture := newTestFixture().withClusterVersion(true)
+		v := validateNoClusterVersionUpgradeInProgress(fixture.cvLister)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "cluster upgrade is in progress")
+	})
+
+	t.Run("fails when ClusterVersion is missing", func(t *testing.T) {
+		cvIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+		v := validateNoClusterVersionUpgradeInProgress(configlistersv1.NewClusterVersionLister(cvIndexer))
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "clusterversions")
 	})
 }
 
@@ -521,6 +553,22 @@ func TestValidateEtcdNotProgressing(t *testing.T) {
 		}
 		assert.Contains(t, err.Error(), "failed to get etcd operator CR")
 	})
+
+	t.Run("fails when the progressing condition is missing", func(t *testing.T) {
+		fixture := newTestFixture()
+		etcd := &operatorv1.Etcd{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+		}
+		if err := fixture.etcdIndexer.Add(etcd); err != nil {
+			t.Fatalf("failed to add etcd CR to indexer: %v", err)
+		}
+		v := validateEtcdNotProgressing(fixture.etcdLister)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "condition is missing")
+	})
 }
 
 func TestValidateEtcdVotingMembers(t *testing.T) {
@@ -613,13 +661,13 @@ func TestValidateMachineConfigNotPresent(t *testing.T) {
 func TestValidateNewRenderedMasterConfig(t *testing.T) {
 	t.Run("passes when a rendered master config exists", func(t *testing.T) {
 		fixture := newTestFixture().withMachineConfigs(newTestMachineConfig("rendered-master-abc123"))
-		v := validateNewRenderedMasterConfig(fixture.mcLister)
+		v := validateNewRenderedMasterConfig(fixture.mcLister, fixture.operatorClient)
 		assert.NoError(t, v())
 	})
 
 	t.Run("fails when no rendered master config exists", func(t *testing.T) {
 		fixture := newTestFixture().withMachineConfigs(newTestMachineConfig("rendered-worker-abc123"))
-		v := validateNewRenderedMasterConfig(fixture.mcLister)
+		v := validateNewRenderedMasterConfig(fixture.mcLister, fixture.operatorClient)
 		err := v()
 		if !assert.Error(t, err) {
 			return
@@ -629,22 +677,47 @@ func TestValidateNewRenderedMasterConfig(t *testing.T) {
 
 	t.Run("fails when no MachineConfigs exist", func(t *testing.T) {
 		fixture := newTestFixture()
-		v := validateNewRenderedMasterConfig(fixture.mcLister)
+		v := validateNewRenderedMasterConfig(fixture.mcLister, fixture.operatorClient)
 		err := v()
 		assert.Error(t, err)
+	})
+
+	t.Run("fails when the only rendered master config predates the transition", func(t *testing.T) {
+		transitionStart := time.Now()
+		fixture := newTestFixture().
+			withTransitionStartTime(transitionStart).
+			withMachineConfigs(newTestMachineConfigAt("rendered-master-abc123", transitionStart.Add(-time.Hour)))
+		v := validateNewRenderedMasterConfig(fixture.mcLister, fixture.operatorClient)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "no rendered master MachineConfig found")
+	})
+
+	t.Run("passes when a rendered master config postdates the transition", func(t *testing.T) {
+		transitionStart := time.Now()
+		fixture := newTestFixture().
+			withTransitionStartTime(transitionStart).
+			withMachineConfigs(
+				newTestMachineConfigAt("rendered-master-abc123", transitionStart.Add(-time.Hour)),
+				newTestMachineConfigAt("rendered-master-def456", transitionStart.Add(time.Hour)),
+			)
+		v := validateNewRenderedMasterConfig(fixture.mcLister, fixture.operatorClient)
+		assert.NoError(t, v())
 	})
 }
 
 func TestValidateNewRenderedWorkerConfig(t *testing.T) {
 	t.Run("passes when a rendered worker config exists", func(t *testing.T) {
 		fixture := newTestFixture().withMachineConfigs(newTestMachineConfig("rendered-worker-abc123"))
-		v := validateNewRenderedWorkerConfig(fixture.mcLister)
+		v := validateNewRenderedWorkerConfig(fixture.mcLister, fixture.operatorClient)
 		assert.NoError(t, v())
 	})
 
 	t.Run("fails when no rendered worker config exists", func(t *testing.T) {
 		fixture := newTestFixture().withMachineConfigs(newTestMachineConfig("rendered-master-abc123"))
-		v := validateNewRenderedWorkerConfig(fixture.mcLister)
+		v := validateNewRenderedWorkerConfig(fixture.mcLister, fixture.operatorClient)
 		err := v()
 		if !assert.Error(t, err) {
 			return
@@ -654,9 +727,22 @@ func TestValidateNewRenderedWorkerConfig(t *testing.T) {
 
 	t.Run("fails when no MachineConfigs exist", func(t *testing.T) {
 		fixture := newTestFixture()
-		v := validateNewRenderedWorkerConfig(fixture.mcLister)
+		v := validateNewRenderedWorkerConfig(fixture.mcLister, fixture.operatorClient)
 		err := v()
 		assert.Error(t, err)
+	})
+
+	t.Run("fails when the only rendered worker config predates the transition", func(t *testing.T) {
+		transitionStart := time.Now()
+		fixture := newTestFixture().
+			withTransitionStartTime(transitionStart).
+			withMachineConfigs(newTestMachineConfigAt("rendered-worker-abc123", transitionStart.Add(-time.Hour)))
+		v := validateNewRenderedWorkerConfig(fixture.mcLister, fixture.operatorClient)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "no rendered worker MachineConfig found")
 	})
 }
 

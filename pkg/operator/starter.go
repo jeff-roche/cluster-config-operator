@@ -301,6 +301,8 @@ func (o *OperatorOptions) RunOperator(ctx context.Context, controllerContext *co
 			operatorInformers.Operator().V1().Etcds().Informer(),
 			configInformers.Config().V1().ClusterOperators().Lister(),
 			configInformers.Config().V1().ClusterOperators().Informer(),
+			configInformers.Config().V1().ClusterVersions().Lister(),
+			configInformers.Config().V1().ClusterVersions().Informer(),
 			operatorInformers.Operator().V1().KubeAPIServers().Lister(),
 			operatorInformers.Operator().V1().KubeAPIServers().Informer(),
 			operatorInformers.Operator().V1().OpenShiftAPIServers().Lister(),
