@@ -180,6 +180,21 @@ func newTestDualRoleNodeWithConditions(name string, unschedulable bool, conditio
 	}
 }
 
+func newTestLegacyMasterNodeWithWorkerLabel(name string, unschedulable bool) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"node-role.kubernetes.io/master": "",
+				"node-role.kubernetes.io/worker": "",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: unschedulable,
+		},
+	}
+}
+
 func newTestEtcdEndpointsConfigMap(memberCount int) *corev1.ConfigMap {
 	data := map[string]string{}
 	for i := 0; i < memberCount; i++ {

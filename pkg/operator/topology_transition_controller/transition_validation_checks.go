@@ -305,6 +305,32 @@ func validateNoClusterVersionUpgradeInProgress(clusterVersionLister configlister
 	}
 }
 
+// validateControlPlaneNodesAreWorkers returns a TransitionValidatorFunc that
+// checks the required number of control plane nodes also carry the worker
+// role label, confirming they are dual-role as expected in a compact HA
+// topology.
+func validateControlPlaneNodesAreWorkers(required int, nodeLister corev1listers.NodeLister) TransitionValidatorFunc {
+	return func() error {
+		nodes, err := listControlPlaneNodes(nodeLister)
+		if err != nil {
+			return fmt.Errorf("failed to list control plane nodes: %w", err)
+		}
+
+		dualRole := 0
+		for _, node := range nodes {
+			if _, ok := node.Labels["node-role.kubernetes.io/worker"]; ok {
+				dualRole++
+			}
+		}
+
+		if dualRole < required {
+			return fmt.Errorf("insufficient control plane nodes marked as workers: need %d, have %d", required, dualRole)
+		}
+
+		return nil
+	}
+}
+
 // validateControlPlaneNodesReady returns a TransitionValidatorFunc that checks
 // the required number of control plane nodes have a Ready=True condition.
 func validateControlPlaneNodesReady(required int, nodeLister corev1listers.NodeLister) TransitionValidatorFunc {

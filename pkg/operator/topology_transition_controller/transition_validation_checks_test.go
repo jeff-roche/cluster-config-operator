@@ -467,6 +467,80 @@ func TestValidateControlPlaneNodesReady(t *testing.T) {
 	})
 }
 
+func TestValidateControlPlaneNodesAreWorkers(t *testing.T) {
+	t.Run("passes when all control plane nodes are dual-role", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestDualRoleNode("master-0", false),
+			newTestDualRoleNode("master-1", false),
+			newTestDualRoleNode("master-2", false),
+		)
+		v := validateControlPlaneNodesAreWorkers(3, fixture.nodeLister)
+		assert.NoError(t, v())
+	})
+
+	t.Run("fails when control plane nodes lack the worker label", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestDualRoleNode("master-0", false),
+			newTestControlPlaneNode("master-1", false),
+			newTestControlPlaneNode("master-2", false),
+		)
+		v := validateControlPlaneNodesAreWorkers(3, fixture.nodeLister)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "insufficient control plane nodes marked as workers: need 3, have 1")
+	})
+
+	t.Run("fails when no control plane nodes have the worker label", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestControlPlaneNode("master-0", false),
+			newTestLegacyMasterNode("master-1", false),
+		)
+		v := validateControlPlaneNodesAreWorkers(2, fixture.nodeLister)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "insufficient control plane nodes marked as workers: need 2, have 0")
+	})
+
+	t.Run("counts dual-role legacy master nodes", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestLegacyMasterNodeWithWorkerLabel("master-0", false),
+			newTestDualRoleNode("master-1", false),
+			newTestDualRoleNode("master-2", false),
+		)
+		v := validateControlPlaneNodesAreWorkers(3, fixture.nodeLister)
+		assert.NoError(t, v())
+	})
+
+	t.Run("passes when more than required", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestDualRoleNode("master-0", false),
+			newTestDualRoleNode("master-1", false),
+			newTestDualRoleNode("master-2", false),
+			newTestDualRoleNode("master-3", false),
+		)
+		v := validateControlPlaneNodesAreWorkers(3, fixture.nodeLister)
+		assert.NoError(t, v())
+	})
+
+	t.Run("does not count dedicated worker nodes", func(t *testing.T) {
+		fixture := newTestFixture().withNodes(
+			newTestDualRoleNode("master-0", false),
+			newTestWorkerNode("worker-0"),
+			newTestWorkerNode("worker-1"),
+		)
+		v := validateControlPlaneNodesAreWorkers(3, fixture.nodeLister)
+		err := v()
+		if !assert.Error(t, err) {
+			return
+		}
+		assert.Contains(t, err.Error(), "insufficient control plane nodes marked as workers: need 3, have 1")
+	})
+}
+
 func TestValidateWorkerNodesReady(t *testing.T) {
 	t.Run("passes when enough dedicated worker nodes ready", func(t *testing.T) {
 		fixture := newTestFixture().withNodes(

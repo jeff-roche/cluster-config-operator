@@ -24,9 +24,9 @@ func snoInfra(specTopology configv1.TopologyMode) *configv1.Infrastructure {
 func readyFixture() *testFixture {
 	return newTestFixture().
 		withNodes(
-			newTestControlPlaneNodeWithConditions("master-0", false, readyNodeCondition()),
-			newTestControlPlaneNodeWithConditions("master-1", false, readyNodeCondition()),
-			newTestControlPlaneNodeWithConditions("master-2", false, readyNodeCondition()),
+			newTestDualRoleNodeWithConditions("master-0", false, readyNodeCondition()),
+			newTestDualRoleNodeWithConditions("master-1", false, readyNodeCondition()),
+			newTestDualRoleNodeWithConditions("master-2", false, readyNodeCondition()),
 		).
 		withEtcdEndpoints(3).
 		withEtcdCR(true, false).

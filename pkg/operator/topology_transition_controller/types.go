@@ -57,6 +57,7 @@ func buildSupportedTransitions(listers TransitionValidationListers) []Transition
 				validateExactInfrastructureNodeCount(0, listers.NodeLister),
 				validateControlPlaneNodesSchedulable(3, listers.NodeLister),
 				validateControlPlaneNodesReady(3, listers.NodeLister),
+				validateControlPlaneNodesAreWorkers(3, listers.NodeLister),
 				validateEtcdQuorum(listers.EtcdLister),
 				validateEtcdNotProgressing(listers.EtcdLister),
 				validateEtcdVotingMembers(3, listers.EtcdConfigMapLister),
