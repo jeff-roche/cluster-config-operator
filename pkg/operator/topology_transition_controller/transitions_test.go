@@ -144,6 +144,7 @@ func TestSNOToHACompact(t *testing.T) {
 		if !assert.NotNil(t, cond) {
 			return
 		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
 		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
 		assert.Contains(t, cond.Message, "insufficient schedulable control plane nodes: need 3, have 2")
 	})
@@ -167,6 +168,7 @@ func TestSNOToHACompact(t *testing.T) {
 		if !assert.NotNil(t, cond) {
 			return
 		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
 		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
 		assert.Contains(t, cond.Message, "insufficient ready control plane nodes: need 3, have 2")
 	})
@@ -190,6 +192,7 @@ func TestSNOToHACompact(t *testing.T) {
 		if !assert.NotNil(t, cond) {
 			return
 		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
 		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
 		assert.Contains(t, cond.Message, "etcd does not have quorum")
 	})
@@ -213,6 +216,7 @@ func TestSNOToHACompact(t *testing.T) {
 		if !assert.NotNil(t, cond) {
 			return
 		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
 		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
 		assert.Contains(t, cond.Message, "etcd is still progressing")
 	})
@@ -236,6 +240,7 @@ func TestSNOToHACompact(t *testing.T) {
 		if !assert.NotNil(t, cond) {
 			return
 		}
+		assert.Equal(t, operatorv1.ConditionFalse, cond.Status)
 		assert.Equal(t, "PreflightCheckFailed", cond.Reason)
 		assert.Contains(t, cond.Message, "insufficient etcd voting members: need 3, have 1")
 	})
